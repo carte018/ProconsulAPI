@@ -20,6 +20,10 @@
         	<param-name>javax.ws.rs.Application</param-name>
         	<param-value>edu.duke.oit.proconsulapi.MainController</param-value>
         </init-param>
+        <init-param>
+        	<param-name>trimSpaces</param-name>
+        	<param-value>true</param-value>
+        </init-param>
     </servlet>
     <servlet-mapping>
       <servlet-name>proconsulapi</servlet-name>

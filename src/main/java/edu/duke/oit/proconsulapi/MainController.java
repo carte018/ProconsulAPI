@@ -13,21 +13,29 @@ import java.util.Locale;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.ApplicationPath;
+import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
+import javax.ws.rs.POST;
 import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
 import javax.ws.rs.core.Application;
 import javax.ws.rs.core.Context;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 
+import org.apache.commons.io.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.ModelAndView;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import edu.duke.oit.proconsulapi.auth.AuthenticationDriver;
 
@@ -40,19 +48,19 @@ public class MainController extends Application {
 	private static final Logger logger = LoggerFactory.getLogger(MainController.class);
 	
 	// Authorization (minimal at first)
-	private boolean isAdmin(HttpServletRequest request) {
+	private boolean isAdmin(HttpServletRequest request, HttpHeaders headers) {
 		// for now, get the list from the config file
 		PCApiConfig config = PCApiConfig.getInstance();
 		String alist = config.getProperty("pcadminlist", true);
 		// Construct Headers
-		HashMap<String,List<String>> hmap = new HashMap<String,List<String>>();
-		Enumeration<String> n = request.getHeaderNames();
-		HttpHeaders headers = new HttpHeaders();
+	//	HashMap<String,List<String>> hmap = new HashMap<String,List<String>>();
+	//	Enumeration<String> n = request.getHeaderNames();
+	//	HttpHeaders headers = new HttpHeaders();
 		
-		while (n.hasMoreElements()) {
-			String hn = n.nextElement();
-			headers.add(hn, request.getHeader(hn));
-		}
+	//	while (n.hasMoreElements()) {
+	//		String hn = n.nextElement();
+	//		headers.add(hn, request.getHeader(hn));
+	//	}
 		
 		String authuser = AuthenticationDriver.getAuthenticatedUser(request, headers, config);
 		String[] aa = alist.split(",");
@@ -65,12 +73,12 @@ public class MainController extends Application {
 	}
 	
 	// Granular authorization for individual panels
-	private boolean isDARuleAdmin(HttpServletRequest request) {
+	private boolean isDARuleAdmin(HttpServletRequest request, HttpHeaders headers) {
 		// Only isAdmin() here
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 	
-	private boolean isLoginRuleAdmin(HttpServletRequest request) {
+	private boolean isLoginRuleAdmin(HttpServletRequest request,HttpHeaders headers) {
 		// Both general admins and subadmins may be authorized to grant users login access
 		PCApiConfig config = PCApiConfig.getInstance();
 		String alist = config.getProperty("loginadmins", false);
@@ -82,10 +90,10 @@ public class MainController extends Application {
 				}
 			}
 		}
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 	
-	private boolean isTargetSystemAdmin(HttpServletRequest request) {
+	private boolean isTargetSystemAdmin(HttpServletRequest request, HttpHeaders headers) {
 		// Target systems may be administered by subadmins or general admins
 		PCApiConfig config = PCApiConfig.getInstance();
 		String alist = config.getProperty("targetsystemadmins", false);
@@ -97,10 +105,10 @@ public class MainController extends Application {
 				}
 			}
 		}
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 	
-	private boolean isPosixAdmin(HttpServletRequest request) {
+	private boolean isPosixAdmin(HttpServletRequest request, HttpHeaders headers) {
 		// Posix user information may be managed by general admins or subadmins
 		PCApiConfig config = PCApiConfig.getInstance();
 		String alist = config.getProperty("posixadmins", false);
@@ -112,10 +120,10 @@ public class MainController extends Application {
 				}
 			}
 		}
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 
-	private boolean isStaticAdmin(HttpServletRequest request) {
+	private boolean isStaticAdmin(HttpServletRequest request, HttpHeaders headers) {
 		// Static user mapping manager
 		PCApiConfig config = PCApiConfig.getInstance();
 		String alist = config.getProperty("staticadmins",false);
@@ -128,30 +136,263 @@ public class MainController extends Application {
 			}
 		}
 		// override for now
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 	
-	private boolean isGroupAdmin(HttpServletRequest request) {
+	private boolean isGroupAdmin(HttpServletRequest request,HttpHeaders headers) {
 		// Only general admins can manage group memberships for dynamic user (since DA is just another group
 		// this right amounts to the right to generate DA accounts, albeit in a way that might set off alarms
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 	
-	private boolean isTargetProvisioningAdmin(HttpServletRequest request) {
+	private boolean isTargetProvisioningAdmin(HttpServletRequest request,HttpHeaders headers) {
 		// Target system provisioning includes group membership controls, so this too is only available to 
 		// general admins
-		return isAdmin(request);
+		return isAdmin(request,headers);
 	}
 	
 	@GET
 	@Path("/test")
-	public Response handleTestGet(@Context HttpServletRequest request) {		
-		if (isAdmin(request)) {
+	public Response handleTestGet(@Context HttpServletRequest request,@Context HttpHeaders headers) {		
+		if (isAdmin(request,headers)) {
 			return Response.status(Status.OK).entity("User IS Admin").build();
 		} else {
 			return Response.status(Status.OK).entity("User NOT Admin").build();
 		}
 	}
+	
+	// API routines for administrative activities.  Primary
+	// targets are operations required to perform provisioning
+	// and deprovisioning of user access rights.
+	//
+	// 
+	// The "/appusers" endpoint handles application user authZ
+	// GET, POST, and DELETE are supported for list, add, and 
+	// remove operations. 
+	
+	@DELETE
+	@Path("/appusers/{eppn}")
+	public Response handleAppUsersDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("eppn") String eppn) {
+		
+		// Given an eppn, remove the associated accessUser
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		Connection conn = null;
+		PreparedStatement ps = null;
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database");
+		}
+		
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		try {
+			ps = conn.prepareStatement("delete from access_user where eppn = ?");
+			if (ps != null) {
+				ps.setString(1, eppn);
+				ps.executeUpdate();
+				return Response.status(Status.OK).entity("Deleted").build();
+			} else {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Deletion failed").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+	
+	@POST
+	@Path("/appusers")
+	public Response handleAppUsersPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		// Given an AccessUserEntry, add it to the authorization set
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		try {
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<AccessUserEntry> appusers = new ArrayList<AccessUserEntry>();
+		
+		if (entity == null || entity.equals("")) {
+			return Response.status(Status.BAD_REQUEST).entity("POST body missing").build();
+		}
+		
+		// We accept either a single AccessUserEntry or an array of AccessUserEntry in input JSON
+		
+		ObjectMapper om = new ObjectMapper().enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+		try {
+			appusers = om.readValue(entity,new TypeReference<List<AccessUserEntry>>(){});
+		} catch (Exception e) {
+			return Response.status(Status.BAD_REQUEST).entity("Unable to deserialize input").build();
+		}
+		
+		if (appusers.isEmpty()) {
+			return Response.status(Status.BAD_REQUEST).entity("POST requires at least one input object").build();
+		}
+		int count = 0;
+		for (AccessUserEntry aue : appusers) {
+			try {
+				ps = conn.prepareStatement("select eppn from access_user where eppn = ?");
+				ps.setString(1,aue.getEppn());
+				if (ps != null) {
+					rs = ps.executeQuery();
+					if (rs == null || !rs.next()) {
+						PreparedStatement ps2 = null;
+						ps2 = conn.prepareStatement("insert into access_user values (?,?)");
+						if (ps2 != null) {
+							ps2.setString(1, aue.getEppn());
+							ps2.setString(2, aue.getType());
+							ps2.executeUpdate();
+							count += 1;
+							ps2.close();
+						}
+					}
+				} 
+			} catch (Exception e) {
+				// ignore exceptions during updates
+			}
+		}
+		
+		return Response.status(Status.ACCEPTED).entity("Created " + count + " new authorizations").build();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+
+	@GET
+	@Path("/appusers") 
+	public Response handleAppUsersGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		// Return a list of the users (by user identifier) authorized to 
+		// use this instance of Proconsul.  This list is the explicit list
+		// of *user* authorizations, not the list of *group* authorizations
+		// (which is managed separately).
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request, headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		// User is authorized
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<AccessUserEntry> appusers = new ArrayList<AccessUserEntry>();
+		
+		try {
+			ps = conn.prepareStatement("select * from access_user where type = 'proconsul'");
+			if (ps == null) {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database query failure").build();
+			}
+			
+			rs = ps.executeQuery();
+			
+			while (rs != null && rs.next()) {
+				AccessUserEntry aue = new AccessUserEntry();
+				aue.setEppn(rs.getString("eppn"));
+				aue.setType(rs.getString("type"));
+				appusers.add(aue);
+			}
+			
+			ps.close();
+			if (rs != null) {
+				rs.close();
+			}
+			
+			if (! appusers.isEmpty()) {
+				ObjectMapper om = new ObjectMapper();
+				String json = om.writeValueAsString(appusers);
+				return Response.status(Status.OK).entity(json.trim()).type("application/json").build();
+			} else {
+				return Response.status(Status.NOT_FOUND).entity("").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	
+	
+	
 /* Commented here forward */
 /*
 

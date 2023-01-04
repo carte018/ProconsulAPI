@@ -15,12 +15,14 @@
  */
 package edu.duke.oit.proconsulapi.auth;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.core.HttpHeaders;
 
 import org.apache.commons.codec.binary.Base64;
-import org.springframework.http.HttpHeaders;
 
 import edu.duke.oit.proconsulapi.PCApiConfig;
 
@@ -51,7 +53,8 @@ public class AuthenticationDriver {
 		}
 		
 		// Get credential information from headers
-		List<String> baHeaders = headers.get("Authorization");
+		List<String> baHeaders = new ArrayList<String>();
+		baHeaders = (Arrays.asList(headers.getHeaderString("Authorization").split(",")));
 		if (baHeaders == null) {
 			return null;  // if no auth header, return null
 		}
