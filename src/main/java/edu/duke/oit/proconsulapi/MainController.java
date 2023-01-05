@@ -161,11 +161,775 @@ public class MainController extends Application {
 		}
 	}
 	
-	// API routines for administrative activities.  Primary
-	// targets are operations required to perform provisioning
+	// API routines for primary administrative activities.  Primary
+	// targets are internal operations required to perform provisioning
 	// and deprovisioning of user access rights.
 	//
+	// The /dynamicgrouphosts endpoint handles authZ for
+	// specific FQDNs by members of groups.  Note that assigning
+	// dynamic group rights does *not* assign application rights 
+	// to the group -- that has to be done separately (or via a 
+	// combined endpoint elsewhere -- this is an atomic case).
+	//
+	
+	@DELETE
+	@Path("/dynamicgrouphosts/{urn}/{fqdn}")
+	public Response handleDynamicGroupHostsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("urn") String urn, @PathParam("fqdn") String fqdn) {
+		
+		// Given a user eppn and fqdn, remove the associated UserHostMapping
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		Connection conn = null;
+		PreparedStatement ps = null;
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database");
+		}
+		
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		try {
+			ps = conn.prepareStatement("delete from group_host where groupurn = ? and fqdn = ?");
+			if (ps != null) {
+				ps.setString(1, urn);
+				ps.setString(2,  fqdn);
+				ps.executeUpdate();
+				return Response.status(Status.OK).entity("Deleted").build();
+			} else {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Deletion failed").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@POST
+	@Path("/dynamicgrouphosts")
+	public Response handleDynamicGroupHostsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		// Given a UserHostMapping, add it to the authorization set
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		try {
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<GroupHostMapping> grouphosts = new ArrayList<GroupHostMapping>();
+		
+		if (entity == null || entity.equals("")) {
+			return Response.status(Status.BAD_REQUEST).entity("POST body missing").build();
+		}
+		
+		// We accept either a single AccessUserEntry or an array of AccessUserEntry in input JSON
+		
+		ObjectMapper om = new ObjectMapper().enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+		try {
+			grouphosts = om.readValue(entity,new TypeReference<List<GroupHostMapping>>(){});
+		} catch (Exception e) {
+			return Response.status(Status.BAD_REQUEST).entity("Unable to deserialize input").build();
+		}
+		
+		if (grouphosts.isEmpty()) {
+			return Response.status(Status.BAD_REQUEST).entity("POST requires at least one input object").build();
+		}
+		int count = 0;
+		for (GroupHostMapping ghm : grouphosts) {
+			try {
+				ps = conn.prepareStatement("select groupurn,fqdn from group_host where groupurn = ? and fqdn = ?");
+				ps.setString(1,ghm.getGroupurn());
+				ps.setString(2, ghm.getFqdn());
+				if (ps != null) {
+					rs = ps.executeQuery();
+					if (rs == null || !rs.next()) {
+						PreparedStatement ps2 = null;
+						ps2 = conn.prepareStatement("insert into group_host values (?,?,?)");
+						if (ps2 != null) {
+							ps2.setString(1, ghm.getGroupurn());
+							ps2.setString(2, ghm.getFqdn());
+							ps2.setString(3, ghm.getOudn());
+							ps2.executeUpdate();
+							count += 1;
+							ps2.close();
+						}
+					}
+				} 
+			} catch (Exception e) {
+				// ignore exceptions during updates
+			}
+		}
+		
+		return Response.status(Status.ACCEPTED).entity("Created " + count + " new bindings").build();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@GET
+	@Path("/dynamicgrouphosts")
+	public Response handleDynamicGroupHostsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<GroupHostMapping> hostmaps = new ArrayList<GroupHostMapping>();
+		
+		try {
+			ps = conn.prepareStatement("select * from group_host");
+			if (ps == null) {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database query failure").build();
+			}
+			
+			rs = ps.executeQuery();
+			
+			while (rs != null && rs.next()) {
+				GroupHostMapping ghm = new GroupHostMapping();
+				ghm.setGroupurn(rs.getString("groupurn"));
+				ghm.setFqdn(rs.getString("fqdn"));
+				ghm.setOudn(rs.getString("ou"));
+				hostmaps.add(ghm);
+			}
+			
+			ps.close();
+			if (rs != null) {
+				rs.close();
+			}
+			
+			if (! hostmaps.isEmpty()) {
+				ObjectMapper om = new ObjectMapper();
+				String json = om.writeValueAsString(hostmaps);
+				return Response.status(Status.OK).entity(json.trim()).type("application/json").build();
+			} else {
+				return Response.status(Status.NOT_FOUND).entity("").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	// The /dynamicuserhosts endpoint handles authorization to 
+	// access specific target FQDNs by specific users.  Note
+	// that assigning dynamic user rights to a user does *not*
+	// automatically assign the user application rights -- these
+	// are atomic operations.  Aggregate operations are handled
+	// in different endpoints.
+	
+	@DELETE
+	@Path("/dynamicuserhosts/{eppn}/{fqdn}")
+	public Response handleDynamicUserHostsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("eppn") String eppn, @PathParam("fqdn") String fqdn) {
+		
+		// Given a user eppn and fqdn, remove the associated UserHostMapping
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		Connection conn = null;
+		PreparedStatement ps = null;
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database");
+		}
+		
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		try {
+			ps = conn.prepareStatement("delete from explicit_hosts where eppn = ? and fqdn = ?");
+			if (ps != null) {
+				ps.setString(1, eppn);
+				ps.setString(2,  fqdn);
+				ps.executeUpdate();
+				return Response.status(Status.OK).entity("Deleted").build();
+			} else {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Deletion failed").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@POST
+	@Path("/dynamicuserhosts")
+	public Response handleDynamicUserHostsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		// Given a UserHostMapping, add it to the authorization set
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		try {
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<UserHostMapping> userhosts = new ArrayList<UserHostMapping>();
+		
+		if (entity == null || entity.equals("")) {
+			return Response.status(Status.BAD_REQUEST).entity("POST body missing").build();
+		}
+		
+		// We accept either a single AccessUserEntry or an array of AccessUserEntry in input JSON
+		
+		ObjectMapper om = new ObjectMapper().enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+		try {
+			userhosts = om.readValue(entity,new TypeReference<List<UserHostMapping>>(){});
+		} catch (Exception e) {
+			return Response.status(Status.BAD_REQUEST).entity("Unable to deserialize input").build();
+		}
+		
+		if (userhosts.isEmpty()) {
+			return Response.status(Status.BAD_REQUEST).entity("POST requires at least one input object").build();
+		}
+		int count = 0;
+		for (UserHostMapping uhm : userhosts) {
+			try {
+				ps = conn.prepareStatement("select eppn,fqdn from explicit_hosts where eppn = ? and fqdn = ?");
+				ps.setString(1,uhm.getEppn());
+				ps.setString(2, uhm.getFqdn());
+				if (ps != null) {
+					rs = ps.executeQuery();
+					if (rs == null || !rs.next()) {
+						PreparedStatement ps2 = null;
+						ps2 = conn.prepareStatement("insert into explicit_hosts values (?,?,?)");
+						if (ps2 != null) {
+							ps2.setString(1, uhm.getEppn());
+							ps2.setString(2, uhm.getFqdn());
+							ps2.setString(3, uhm.getOudn());
+							ps2.executeUpdate();
+							count += 1;
+							ps2.close();
+						}
+					}
+				} 
+			} catch (Exception e) {
+				// ignore exceptions during updates
+			}
+		}
+		
+		return Response.status(Status.ACCEPTED).entity("Created " + count + " new bindings").build();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@GET
+	@Path("/dynamicuserhosts")
+	public Response handleDynamicUserHostsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<UserHostMapping> hostmaps = new ArrayList<UserHostMapping>();
+		
+		try {
+			ps = conn.prepareStatement("select * from explicit_hosts");
+			if (ps == null) {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database query failure").build();
+			}
+			
+			rs = ps.executeQuery();
+			
+			while (rs != null && rs.next()) {
+				UserHostMapping uhm = new UserHostMapping();
+				uhm.setEppn(rs.getString("eppn"));
+				uhm.setFqdn(rs.getString("fqdn"));
+				uhm.setOudn(rs.getString("ou"));
+				hostmaps.add(uhm);
+			}
+			
+			ps.close();
+			if (rs != null) {
+				rs.close();
+			}
+			
+			if (! hostmaps.isEmpty()) {
+				ObjectMapper om = new ObjectMapper();
+				String json = om.writeValueAsString(hostmaps);
+				return Response.status(Status.OK).entity(json.trim()).type("application/json").build();
+			} else {
+				return Response.status(Status.NOT_FOUND).entity("").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
 	// 
+	// The "/appentitlements" endpoint handles app authorizations
+	// for entitlement values.  We don't use entitlements currently,
+	// so this is unimplemented for the moment, but it can be added
+	// on short notice at need.
+	
+	@DELETE
+	@Path("/appentitlements/{urn}")
+	public Response handleAppEntitlementsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("urn") String urn) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@POST
+	@Path("/appentitlements")
+	public Response handleAppEntitlementsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@GET
+	@Path("/appentitlements")
+	public Response handleAppEntitlementsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	// The "/dausers" and "/dagroups" endpoints handle authorization
+	// for users and groups (respectively) for Domain Admin access.
+	// For now, these are noops -- domain admin access requires 
+	// manual intervention by a human admin.  These can be expanded
+	// easily enough at a later time.
+	@DELETE
+	@Path("/dagroups/{urn}")
+	public Response handleDomainAdminGroupsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("urn") String urn) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@POST
+	@Path("/dagroups")
+	public Response handleDomainAdminGroupsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@GET
+	@Path("/dagroups")
+	public Response handleDomainAdminGroupsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@DELETE
+	@Path("/dausers/{eppn}")
+	public Response handleDomainAdminUsersDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("eppn") String eppn) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@POST
+	@Path("/dausers")
+	public Response handleDomainAdminUsersPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	@GET
+	@Path("/dausers")
+	public Response handleDomainAdminUsersGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	// The "/appgroups" endpoint handles application group authZ
+	// GET, POST, and DELETE are supported for list, add, and 
+	// remove operations.
+	// This pertains to group memberships that confer app access,
+	// rather than explict user access rules (which are handled
+	// by the /appusers/ endpoint)
+	
+	@DELETE
+	@Path("/appgroups/{urn}")
+	public Response handleAppGroupsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("urn") String urn) {
+		
+		// Given a urn, remove the associated accessGroup
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		Connection conn = null;
+		PreparedStatement ps = null;
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database");
+		}
+		
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		try {
+			ps = conn.prepareStatement("delete from access_groups where groupurn = ?");
+			if (ps != null) {
+				ps.setString(1, urn);
+				ps.executeUpdate();
+				return Response.status(Status.OK).entity("Deleted").build();
+			} else {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Deletion failed").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					//ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@POST
+	@Path("/appgroups")
+	public Response handleAppGroupsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		// Given an AccessGroupEntry, add it to the authorization set
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		try {
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<AccessGroupEntry> appgroups = new ArrayList<AccessGroupEntry>();
+		
+		if (entity == null || entity.equals("")) {
+			return Response.status(Status.BAD_REQUEST).entity("POST body missing").build();
+		}
+		
+		// We accept either a single AccessUserEntry or an array of AccessUserEntry in input JSON
+		
+		ObjectMapper om = new ObjectMapper().enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+		try {
+			appgroups = om.readValue(entity,new TypeReference<List<AccessGroupEntry>>(){});
+		} catch (Exception e) {
+			return Response.status(Status.BAD_REQUEST).entity("Unable to deserialize input").build();
+		}
+		
+		if (appgroups.isEmpty()) {
+			return Response.status(Status.BAD_REQUEST).entity("POST requires at least one input object").build();
+		}
+		int count = 0;
+		for (AccessGroupEntry age : appgroups) {
+			try {
+				ps = conn.prepareStatement("select groupurn from access_groups where groupurn = ?");
+				ps.setString(1,age.getGroupurn());
+				if (ps != null) {
+					rs = ps.executeQuery();
+					if (rs == null || !rs.next()) {
+						PreparedStatement ps2 = null;
+						ps2 = conn.prepareStatement("insert into access_groups values (?,?,?)");
+						if (ps2 != null) {
+							ps2.setString(1, age.getGroupurn());
+							ps2.setString(2, age.getOu());
+							ps2.setString(3, age.getType()==null?age.getType():"proconsul");
+							ps2.executeUpdate();
+							count += 1;
+							ps2.close();
+						}
+					}
+				} 
+			} catch (Exception e) {
+				// ignore exceptions during updates
+			}
+		}
+		
+		return Response.status(Status.ACCEPTED).entity("Created " + count + " new authorizations").build();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@GET
+	@Path("/appgroups")
+	public Response handleAppGroupsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		//
+		// List the groups conferring access rights (if any)
+		//
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<AccessGroupEntry> appgroups = new ArrayList<AccessGroupEntry>();
+		
+		try {
+			ps = conn.prepareStatement("select * from access_groups where type = 'proconsul'");
+			if (ps == null) {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database query failure").build();
+			}
+			
+			rs = ps.executeQuery();
+			
+			while (rs != null && rs.next()) {
+				AccessGroupEntry age = new AccessGroupEntry();
+				age.setGroupurn(rs.getString("groupurn"));
+				age.setType(rs.getString("type"));
+				appgroups.add(age);
+			}
+			
+			ps.close();
+			if (rs != null) {
+				rs.close();
+			}
+			
+			if (! appgroups.isEmpty()) {
+				ObjectMapper om = new ObjectMapper();
+				String json = om.writeValueAsString(appgroups);
+				return Response.status(Status.OK).entity(json.trim()).type("application/json").build();
+			} else {
+				return Response.status(Status.NOT_FOUND).entity("").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
 	// The "/appusers" endpoint handles application user authZ
 	// GET, POST, and DELETE are supported for list, add, and 
 	// remove operations. 
