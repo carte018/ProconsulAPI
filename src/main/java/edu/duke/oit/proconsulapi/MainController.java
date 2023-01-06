@@ -165,6 +165,287 @@ public class MainController extends Application {
 	// targets are internal operations required to perform provisioning
 	// and deprovisioning of user access rights.
 	//
+	
+	// Basic static user management involves simply recording
+	// mappings from users to hosts and static target users.
+	// The /staticusers endpiont handles basic static user
+	// management.  It does *not* manage the creation or 
+	// configuration/provisioning of target users -- that's 
+	// handled in other endpoints.  
+	//
+	// There is only one possible targetuser for a given 
+	// (eppn,fqdn) pair.
+	
+	@DELETE
+	@Path("/staticusers/{eppn}/{fqdn}")
+	public Response handleStaticUsersDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("eppn") String eppn, @PathParam("fqdn") String fqdn) {
+		
+		// Given a user eppn and fqdn, remove the associated static mapping
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		Connection conn = null;
+		PreparedStatement ps = null;
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database");
+		}
+		
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		try {
+			ps = conn.prepareStatement("delete from static_host where eppn = ? and fqdn = ?");
+			if (ps != null) {
+				ps.setString(1, eppn);
+				ps.setString(2,  fqdn);
+				ps.executeUpdate();
+				return Response.status(Status.OK).entity("Deleted").build();
+			} else {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Deletion failed").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@POST
+	@Path("/staticusers")
+	public Response handleStaticUsersPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		// Given a UserHostMapping, add it to the authorization set
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		try {
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<StaticUser> staticusers = new ArrayList<StaticUser>();
+		
+		if (entity == null || entity.equals("")) {
+			return Response.status(Status.BAD_REQUEST).entity("POST body missing").build();
+		}
+		
+		// We accept either a single AccessUserEntry or an array of AccessUserEntry in input JSON
+		
+		ObjectMapper om = new ObjectMapper().enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+		try {
+			staticusers = om.readValue(entity,new TypeReference<List<StaticUser>>(){});
+		} catch (Exception e) {
+			return Response.status(Status.BAD_REQUEST).entity("Unable to deserialize input").build();
+		}
+		
+		if (staticusers.isEmpty()) {
+			return Response.status(Status.BAD_REQUEST).entity("POST requires at least one input object").build();
+		}
+		int count = 0;
+		for (StaticUser su : staticusers) {
+			try {
+				ps = conn.prepareStatement("select eppn,fqdn from static_host where eppn = ? and fqdn = ?");
+				ps.setString(1,su.getEppn());
+				ps.setString(2, su.getFqdn());
+				if (ps != null) {
+					rs = ps.executeQuery();
+					if (rs == null || !rs.next()) {
+						PreparedStatement ps2 = null;
+						ps2 = conn.prepareStatement("insert into static_host values (?,?,?)");
+						if (ps2 != null && su.getEppn() != null && su.getFqdn() != null && su.getTargetuser() != null) {
+							ps2.setString(1, su.getEppn());
+							ps2.setString(2, su.getFqdn());
+							ps2.setString(3, su.getTargetuser());
+							ps2.executeUpdate();
+							count += 1;
+							ps2.close();
+						} 
+					}
+				} 
+			} catch (Exception e) {
+				// ignore exceptions during updates
+			}
+		}
+		
+		return Response.status(Status.ACCEPTED).entity("Created " + count + " new bindings").build();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@GET
+	@Path("/staticusers")
+	public Response handleStaticUsersGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<StaticUser> staticusers = new ArrayList<StaticUser>();
+		
+		try {
+			ps = conn.prepareStatement("select * from static_host");
+			if (ps == null) {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database query failure").build();
+			}
+			
+			rs = ps.executeQuery();
+			
+			while (rs != null && rs.next()) {
+				StaticUser su = new StaticUser();
+				su.setEppn(rs.getString("eppn"));
+				su.setFqdn(rs.getString("fqdn"));
+				su.setTargetuser(rs.getString("targetuser"));
+				staticusers.add(su);
+			}
+			
+			ps.close();
+			if (rs != null) {
+				rs.close();
+			}
+			
+			if (! staticusers.isEmpty()) {
+				ObjectMapper om = new ObjectMapper();
+				String json = om.writeValueAsString(staticusers);
+				return Response.status(Status.OK).entity(json.trim()).type("application/json").build();
+			} else {
+				return Response.status(Status.NOT_FOUND).entity("").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	
+	// Domain admin host changes require manual intervention for now.
+	// API does not implement interfaces for managing them.
+	// If it ever does, they will appear at the /dahosts endpoint
+	
+	@DELETE
+	@Path("/dahosts/{fqdn}")
+	public Response handleDAHostsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("fqdn") String fqdn) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented.").build();
+	}
+	@POST
+	@Path("/dahosts")
+	public Response handleDAHostsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented.").build();
+	}
+	@GET
+	@Path("/dahosts")
+	public Response handleDAHostsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented.").build();
+	}
+	
+	// Entitlements are not in use at the moment, so we stub out
+	// the /dynamicentitlmenthosts endpoints
+	//
+	
+	@DELETE
+	@Path("/dynamicentitlementhosts/{urn}/{fqdn}")
+	public Response handleDynamicEntitlementHostsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented.").build();
+	}
+	@POST
+	@Path("/dynamicentitlementhosts")
+	public Response handleDynamicEntitlementHostsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented.").build();
+	}
+	@GET
+	@Path("/dynamicentitlementhosts")
+	public Response handleDynamicEntitlementHostsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		return Response.status(Status.ACCEPTED).entity("Not implemented").build();
+	}
+	
 	// The /dynamicgrouphosts endpoint handles authZ for
 	// specific FQDNs by members of groups.  Note that assigning
 	// dynamic group rights does *not* assign application rights 
