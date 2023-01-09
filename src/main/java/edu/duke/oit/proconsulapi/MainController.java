@@ -1687,6 +1687,244 @@ public class MainController extends Application {
 		}
 	}
 	
+	// The /groupgroups endpoint manages the equivalent maps from
+	// isMemberOf groupURNs to group DNs in the AD for assignment
+	// to dynamic users.  Essentially, members of a SAML group
+	// will have their dynamic homonculi provisioned in the 
+	// specified AD group(s).
+	
+	@DELETE
+	@Path("/groupgroups/{urn}/{groupdn}")
+	public Response handleGroupGroupsDelete(@Context HttpServletRequest request, @Context HttpHeaders headers, @PathParam("urn") String urn, @PathParam("groupdn") String groupdn) {
+		
+		// Given a urn, remove the associated accessGroup
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		Connection conn = null;
+		PreparedStatement ps = null;
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database");
+		}
+		
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		try {
+			ps = conn.prepareStatement("delete from group_group where groupurn = ? and groupdn = ?");
+			if (ps != null) {
+				ps.setString(1, urn);
+				ps.setString(2,  groupdn);
+				ps.executeUpdate();
+				return Response.status(Status.OK).entity("Deleted").build();
+			} else {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Deletion failed").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					//ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@POST
+	@Path("/groupgroups")
+	public Response handleGroupGroupsPost(@Context HttpServletRequest request, @Context HttpHeaders headers, String entity) {
+		// Given an AccessGroupEntry, add it to the authorization set
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		// Authorization
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		try {
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<GroupGroupMapping> groupgroups = new ArrayList<GroupGroupMapping>();
+		
+		if (entity == null || entity.equals("")) {
+			return Response.status(Status.BAD_REQUEST).entity("POST body missing").build();
+		}
+		
+		// We accept either a single UserGroupMapping or an array of them in input JSON
+		
+		ObjectMapper om = new ObjectMapper().enable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY);
+		try {
+			groupgroups = om.readValue(entity,new TypeReference<List<GroupGroupMapping>>(){});
+		} catch (Exception e) {
+			return Response.status(Status.BAD_REQUEST).entity("Unable to deserialize input").build();
+		}
+		
+		if (groupgroups.isEmpty()) {
+			return Response.status(Status.BAD_REQUEST).entity("POST requires at least one input object").build();
+		}
+		int count = 0;
+		for (GroupGroupMapping ggm : groupgroups) {
+			try {
+				ps = conn.prepareStatement("select groupurn from group_group where groupurn = ? and groupdn = ?");
+				ps.setString(1,ggm.getGroupurn());
+				ps.setString(2, ggm.getGroupdn());
+				if (ps != null && ggm.getGroupurn() != null && ggm.getGroupdn() != null) {
+					rs = ps.executeQuery();
+					if (rs == null || !rs.next()) {
+						PreparedStatement ps2 = null;
+						ps2 = conn.prepareStatement("insert into group_group values (?,?)");
+						if (ps2 != null) {
+							ps2.setString(1, ggm.getGroupurn());
+							ps2.setString(2, ggm.getGroupdn());
+							ps2.executeUpdate();
+							count += 1;
+							ps2.close();
+						}
+					}
+				} 
+			} catch (Exception e) {
+				// ignore exceptions during updates
+			}
+		}
+		
+		return Response.status(Status.ACCEPTED).entity("Created " + count + " new authorizations").build();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	@GET
+	@Path("/groupgroups")
+	public Response handleGroupGroupsGet(@Context HttpServletRequest request, @Context HttpHeaders headers) {
+		//
+		// List the groups assigned to users (if any)
+		//
+		
+		Connection conn = null;
+		PreparedStatement ps = null;
+		ResultSet rs = null;
+		
+		PCApiConfig config = PCApiConfig.getInstance();
+		
+		if (!isAdmin(request,headers)) {
+			return Response.status(Status.FORBIDDEN).entity("You are not authorized to perform this operation").build();
+		}
+		
+		try {
+			conn = DatabaseConnectionFactory.getPCApiDBConnection();
+		} catch (Exception e) {
+			throw new RuntimeException("Failed connecting to database: " + e.getMessage());
+		}
+		if (conn == null) {
+			return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database connection failed").build();
+		}
+		
+		// Connected
+		
+		ArrayList<GroupGroupMapping> groupgroups = new ArrayList<GroupGroupMapping>();
+		
+		try {
+			ps = conn.prepareStatement("select * from group_group");
+			if (ps == null) {
+				return Response.status(Status.INTERNAL_SERVER_ERROR).entity("Database query failure").build();
+			}
+			
+			rs = ps.executeQuery();
+			
+			while (rs != null && rs.next()) {
+				GroupGroupMapping ggm = new GroupGroupMapping();
+				ggm.setGroupurn(rs.getString("groupurn"));
+				ggm.setGroupdn(rs.getString("groupdn"));
+				groupgroups.add(ggm);
+			}
+			
+			ps.close();
+			if (rs != null) {
+				rs.close();
+			}
+			
+			if (! groupgroups.isEmpty()) {
+				ObjectMapper om = new ObjectMapper();
+				String json = om.writeValueAsString(groupgroups);
+				return Response.status(Status.OK).entity(json.trim()).type("application/json").build();
+			} else {
+				return Response.status(Status.NOT_FOUND).entity("").build();
+			}
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+			if (ps != null) {
+				try {
+					ps.close();
+				} catch(Exception e) {
+					// ignore
+				}
+			}
+			if (conn != null) {
+				try {
+					conn.close();
+				} catch (Exception e) {
+					// ignore
+				}
+			}
+		}
+	}
+	
 	// The /posixusers endpoint manages POSIX user attributes
 	// for application to dynamic homunculi.  
 	//
